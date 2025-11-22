@@ -173,13 +173,6 @@ spec:
         app: mongo
         instance: mongo-b
     spec:
-      initContainers:
-        - name: fix-perms
-          image: mongo:7.0
-          command: ["/bin/sh", "-c", "chmod 400 /etc/mongo-keyfile/keyfile"]
-          volumeMounts:
-            - name: keyfile
-              mountPath: /etc/mongo-keyfile
       containers:
         - name: mongo
           image: mongo:7.0
