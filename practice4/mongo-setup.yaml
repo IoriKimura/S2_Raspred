@@ -1,0 +1,206 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: mongo
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: mongo-secrets
+  namespace: mongo
+type: Opaque
+stringData:
+  root-user: root
+  root-password: rootpass123
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: mongo-a-init
+  namespace: mongo
+data:
+  init.js: |
+    // Инициализация MongoDB в первом контейнере
+    const dbName = "dbA";
+    const localUser = "localA";
+    const localPass = "localAPass!";
+    const sharedUser = "sharedReader";
+    const sharedPass = "sharedReaderPass!";
+
+    const seedValue = () => Math.random().toString(36).slice(2, 10);
+
+    const dbInstance = db.getSiblingDB(dbName);
+    dbInstance.sample.insertMany([
+      { key: seedValue(), createdAt: new Date() },
+      { key: seedValue(), createdAt: new Date() },
+    ]);
+
+    dbInstance.createUser({
+      user: localUser,
+      pwd: localPass,
+      roles: [{ role: "readWrite", db: dbName }],
+    });
+
+    // Этот пользователь будет существовать в обеих базах,
+    // позволяя подключаться к соседнему контейнеру с теми же учетными данными.
+    dbInstance.createUser({
+      user: sharedUser,
+      pwd: sharedPass,
+      roles: [{ role: "read", db: dbName }],
+    });
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: mongo-b-init
+  namespace: mongo
+data:
+  init.js: |
+    // Инициализация MongoDB во втором контейнере
+    const dbName = "dbB";
+    const localUser = "localB";
+    const localPass = "localBPass!";
+    const sharedUser = "sharedReader";
+    const sharedPass = "sharedReaderPass!";
+
+    const seedValue = () => Math.random().toString(36).slice(2, 10);
+
+    const dbInstance = db.getSiblingDB(dbName);
+    dbInstance.sample.insertMany([
+      { key: seedValue(), createdAt: new Date() },
+      { key: seedValue(), createdAt: new Date() },
+    ]);
+
+    dbInstance.createUser({
+      user: localUser,
+      pwd: localPass,
+      roles: [{ role: "readWrite", db: dbName }],
+    });
+
+    // Пользователь с теми же учетными данными, что и в dbA,
+    // может подключиться к этому сервису и видеть данные соседнего контейнера.
+    dbInstance.createUser({
+      user: sharedUser,
+      pwd: sharedPass,
+      roles: [{ role: "read", db: dbName }],
+    });
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mongo-a
+  namespace: mongo
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: mongo
+      instance: a
+  template:
+    metadata:
+      labels:
+        app: mongo
+        instance: a
+    spec:
+      containers:
+        - name: mongo
+          image: mongo:7.0
+          ports:
+            - containerPort: 27017
+          env:
+            - name: MONGO_INITDB_ROOT_USERNAME
+              valueFrom:
+                secretKeyRef:
+                  name: mongo-secrets
+                  key: root-user
+            - name: MONGO_INITDB_ROOT_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: mongo-secrets
+                  key: root-password
+          volumeMounts:
+            - name: data
+              mountPath: /data/db
+            - name: init-script
+              mountPath: /docker-entrypoint-initdb.d/init.js
+              subPath: init.js
+      volumes:
+        - name: data
+          emptyDir: {}
+        - name: init-script
+          configMap:
+            name: mongo-a-init
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: svc-mongo-a
+  namespace: mongo
+spec:
+  selector:
+    app: mongo
+    instance: a
+  ports:
+    - name: mongo
+      port: 27017
+      targetPort: 27017
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mongo-b
+  namespace: mongo
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: mongo
+      instance: b
+  template:
+    metadata:
+      labels:
+        app: mongo
+        instance: b
+    spec:
+      containers:
+        - name: mongo
+          image: mongo:7.0
+          ports:
+            - containerPort: 27017
+          env:
+            - name: MONGO_INITDB_ROOT_USERNAME
+              valueFrom:
+                secretKeyRef:
+                  name: mongo-secrets
+                  key: root-user
+            - name: MONGO_INITDB_ROOT_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: mongo-secrets
+                  key: root-password
+          volumeMounts:
+            - name: data
+              mountPath: /data/db
+            - name: init-script
+              mountPath: /docker-entrypoint-initdb.d/init.js
+              subPath: init.js
+      volumes:
+        - name: data
+          emptyDir: {}
+        - name: init-script
+          configMap:
+            name: mongo-b-init
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: svc-mongo-b
+  namespace: mongo
+spec:
+  selector:
+    app: mongo
+    instance: b
+  ports:
+    - name: mongo
+      port: 27017
+      targetPort: 27017
