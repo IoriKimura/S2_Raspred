@@ -11,7 +11,7 @@ metadata:
 type: Opaque
 stringData:
   root-user: root
-  root-password: rootpass123
+  root-password: rootpwd
 ---
 apiVersion: v1
 kind: ConfigMap
@@ -22,10 +22,10 @@ data:
   init.js: |
     // Инициализация MongoDB в первом контейнере
     const dbName = "dbA";
-    const localUser = "localA";
-    const localPass = "localAPass!";
-    const sharedUser = "sharedReader";
-    const sharedPass = "sharedReaderPass!";
+    const localUser = "userA";
+    const localPass = "passwordA";
+    const sharedUser = "reader";
+    const sharedPass = "passwordR";
 
     const seedValue = () => Math.random().toString(36).slice(2, 10);
 
@@ -58,10 +58,10 @@ data:
   init.js: |
     // Инициализация MongoDB во втором контейнере
     const dbName = "dbB";
-    const localUser = "localB";
-    const localPass = "localBPass!";
-    const sharedUser = "sharedReader";
-    const sharedPass = "sharedReaderPass!";
+    const localUser = "userB";
+    const localPass = "passwordB";
+    const sharedUser = "reader";
+    const sharedPass = "passwordR";
 
     const seedValue = () => Math.random().toString(36).slice(2, 10);
 
@@ -95,12 +95,12 @@ spec:
   selector:
     matchLabels:
       app: mongo
-      instance: a
+      instance: mongo-a
   template:
     metadata:
       labels:
         app: mongo
-        instance: a
+        instance: mongo-a
     spec:
       containers:
         - name: mongo
@@ -139,32 +139,34 @@ metadata:
 spec:
   selector:
     app: mongo
-    instance: a
+    instance: mongo-a
   ports:
     - name: mongo
       port: 27017
       targetPort: 27017
 ---
 apiVersion: apps/v1
-kind: Deployment
+kind: StatefulSet
 metadata:
   name: mongo-b
   namespace: mongo
 spec:
-  replicas: 1
+  serviceName: svc-mongo-b
+  replicas: 4
   selector:
     matchLabels:
       app: mongo
-      instance: b
+      instance: mongo-b
   template:
     metadata:
       labels:
         app: mongo
-        instance: b
+        instance: mongo-b
     spec:
       containers:
         - name: mongo
           image: mongo:7.0
+          command: ["mongod", "--replSet", "rs-b", "--bind_ip_all"]
           ports:
             - containerPort: 27017
           env:
@@ -192,15 +194,85 @@ spec:
             name: mongo-b-init
 ---
 apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: mongo-b-rs-init
+  namespace: mongo
+data:
+  init.sh: |
+    #!/bin/sh
+    set -e
+    PRIMARY="mongo-b-0.svc-mongo-b.mongo.svc.cluster.local:27017"
+    MEMBERS="[
+      {_id: 0, host: \"mongo-b-0.svc-mongo-b.mongo.svc.cluster.local:27017\"},
+      {_id: 1, host: \"mongo-b-1.svc-mongo-b.mongo.svc.cluster.local:27017\"},
+      {_id: 2, host: \"mongo-b-2.svc-mongo-b.mongo.svc.cluster.local:27017\"},
+      {_id: 3, host: \"mongo-b-3.svc-mongo-b.mongo.svc.cluster.local:27017\"}
+    ]"
+
+    wait_for() {
+      local host="$1"
+      until mongosh --quiet --host "$host" -u "$MONGO_INITDB_ROOT_USERNAME" -p "$MONGO_INITDB_ROOT_PASSWORD" --authenticationDatabase admin --eval "db.runCommand({ ping: 1 })" >/dev/null 2>&1; do
+        echo "Waiting for $host..."
+        sleep 2
+      done
+    }
+
+    wait_for "$PRIMARY"
+    mongosh --quiet --host "$PRIMARY" -u "$MONGO_INITDB_ROOT_USERNAME" -p "$MONGO_INITDB_ROOT_PASSWORD" --authenticationDatabase admin --eval "
+      const status = rs.status().ok;
+      if (status !== 1) {
+        rs.initiate({ _id: 'rs-b', members: ${MEMBERS} });
+      }
+    "
+---
+apiVersion: v1
 kind: Service
 metadata:
   name: svc-mongo-b
   namespace: mongo
 spec:
+  clusterIP: None
   selector:
     app: mongo
-    instance: b
+    instance: mongo-b
   ports:
     - name: mongo
       port: 27017
       targetPort: 27017
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: mongo-b-rs-init
+  namespace: mongo
+spec:
+  template:
+    metadata:
+      labels:
+        job: mongo-b-rs-init
+    spec:
+      restartPolicy: OnFailure
+      containers:
+        - name: init
+          image: mongo:7.0
+          command: ["/bin/sh", "/scripts/init.sh"]
+          env:
+            - name: MONGO_INITDB_ROOT_USERNAME
+              valueFrom:
+                secretKeyRef:
+                  name: mongo-secrets
+                  key: root-user
+            - name: MONGO_INITDB_ROOT_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: mongo-secrets
+                  key: root-password
+          volumeMounts:
+            - name: scripts
+              mountPath: /scripts
+      volumes:
+        - name: scripts
+          configMap:
+            name: mongo-b-rs-init
+            defaultMode: 0755
