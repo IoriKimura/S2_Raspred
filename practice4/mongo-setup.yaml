@@ -229,7 +229,8 @@ spec:
       containers:
         - name: mongo
           image: mongo:7.0
-          # НЕ переопределяем entrypoint, только добавляем аргументы к mongod
+          securityContext:
+            runAsUser: 0        # <<< добавили
           args:
             - "--replSet"
             - "rs-b"
