@@ -30,7 +30,7 @@ metadata:
   namespace: mongo
 data:
   init.js: |
-    // Инициализация MongoDB в первом контейнере
+    // Init script for standalone Mongo A
     const dbName = "dbA";
     const localUser = "userA";
     const localPass = "passwordA";
@@ -51,44 +51,6 @@ data:
       roles: [{ role: "readWrite", db: dbName }],
     });
 
-    // Этот пользователь будет существовать в обеих базах,
-    // позволяя подключаться к соседнему контейнеру с теми же учетными данными.
-    dbInstance.createUser({
-      user: sharedUser,
-      pwd: sharedPass,
-      roles: [{ role: "read", db: dbName }],
-    });
----
-apiVersion: v1
-kind: ConfigMap
-metadata:
-  name: mongo-b-init
-  namespace: mongo
-data:
-  init.js: |
-    // Инициализация MongoDB во втором контейнере
-    const dbName = "dbB";
-    const localUser = "userB";
-    const localPass = "passwordB";
-    const sharedUser = "reader";
-    const sharedPass = "passwordR";
-
-    const seedValue = () => Math.random().toString(36).slice(2, 10);
-
-    const dbInstance = db.getSiblingDB(dbName);
-    dbInstance.sample.insertMany([
-      { key: seedValue(), createdAt: new Date() },
-      { key: seedValue(), createdAt: new Date() },
-    ]);
-
-    dbInstance.createUser({
-      user: localUser,
-      pwd: localPass,
-      roles: [{ role: "readWrite", db: dbName }],
-    });
-
-    // Пользователь с теми же учетными данными, что и в dbA,
-    // может подключиться к этому сервису и видеть данные соседнего контейнера.
     dbInstance.createUser({
       user: sharedUser,
       pwd: sharedPass,
@@ -155,6 +117,83 @@ spec:
       port: 27017
       targetPort: 27017
 ---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: mongo-b-init
+  namespace: mongo
+data:
+  init.sh: |
+    #!/bin/sh
+    set -e
+    PRIMARY="mongo-b-0.svc-mongo-b:27017"
+    MEMBERS="[
+      {_id: 0, host: \"mongo-b-0.svc-mongo-b:27017\"},
+      {_id: 1, host: \"mongo-b-1.svc-mongo-b:27017\"},
+      {_id: 2, host: \"mongo-b-2.svc-mongo-b:27017\"},
+      {_id: 3, host: \"mongo-b-3.svc-mongo-b:27017\"}
+    ]"
+
+    wait_for() {
+      local host="$1"
+      until mongosh --quiet --host "$host" -u "$MONGO_INITDB_ROOT_USERNAME" -p "$MONGO_INITDB_ROOT_PASSWORD" --authenticationDatabase admin --eval "db.runCommand({ ping: 1 })" >/dev/null 2>&1; do
+        echo "Waiting for $host..."
+        sleep 2
+      done
+    }
+
+    wait_primary() {
+      until mongosh --quiet --host "$PRIMARY" -u "$MONGO_INITDB_ROOT_USERNAME" -p "$MONGO_INITDB_ROOT_PASSWORD" --authenticationDatabase admin --eval "rs.isMaster().ismaster" | grep -q "true"; do
+        echo "Waiting for primary state..."
+        sleep 2
+      done
+    }
+
+    wait_for "$PRIMARY"
+    mongosh --quiet --host "$PRIMARY" -u "$MONGO_INITDB_ROOT_USERNAME" -p "$MONGO_INITDB_ROOT_PASSWORD" --authenticationDatabase admin --eval "
+      try {
+        const cfg = { _id: 'rs-b', members: ${MEMBERS} };
+        const status = rs.status().ok;
+        if (status !== 1) {
+          rs.initiate(cfg);
+        }
+      } catch (e) {
+        if (!/already initialized/.test(e.message)) { throw e; }
+      }
+    "
+
+    wait_primary
+
+    mongosh --quiet --host "$PRIMARY" -u "$MONGO_INITDB_ROOT_USERNAME" -p "$MONGO_INITDB_ROOT_PASSWORD" --authenticationDatabase admin <<'EOF'
+      const dbName = "dbB";
+      const localUser = "userB";
+      const localPass = "passwordB";
+      const sharedUser = "reader";
+      const sharedPass = "passwordR";
+      const seedValue = () => Math.random().toString(36).slice(2, 10);
+      const dbInstance = db.getSiblingDB(dbName);
+      if (!dbInstance.getUser(localUser)) {
+        dbInstance.createUser({
+          user: localUser,
+          pwd: localPass,
+          roles: [{ role: "readWrite", db: dbName }],
+        });
+      }
+      if (!dbInstance.getUser(sharedUser)) {
+        dbInstance.createUser({
+          user: sharedUser,
+          pwd: sharedPass,
+          roles: [{ role: "read", db: dbName }],
+        });
+      }
+      if (dbInstance.sample.countDocuments() === 0) {
+        dbInstance.sample.insertMany([
+          { key: seedValue(), createdAt: new Date() },
+          { key: seedValue(), createdAt: new Date() },
+        ]);
+      }
+    EOF
+---
 apiVersion: apps/v1
 kind: StatefulSet
 metadata:
@@ -199,12 +238,30 @@ spec:
           volumeMounts:
             - name: data
               mountPath: /data/db
-            - name: init-script
-              mountPath: /docker-entrypoint-initdb.d/init.js
-              subPath: init.js
             - name: keyfile
               mountPath: /etc/mongo-keyfile
               readOnly: true
+      volumes:
+        - name: data
+          emptyDir: {}
+        - name: keyfile
+          secret:
+            secretName: mongo-keyfile
+            defaultMode: 0400
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: mongo-b-rs-init
+  namespace: mongo
+spec:
+  template:
+    metadata:
+      labels:
+        job: mongo-b-rs-init
+    spec:
+      restartPolicy: OnFailure
+      containers:
         - name: rs-init
           image: mongo:7.0
           command: ["/bin/sh", "/scripts/init.sh"]
@@ -222,56 +279,11 @@ spec:
           volumeMounts:
             - name: scripts
               mountPath: /scripts
-            - name: keyfile
-              mountPath: /etc/mongo-keyfile
-              readOnly: true
       volumes:
-        - name: data
-          emptyDir: {}
-        - name: init-script
-          configMap:
-            name: mongo-b-init
         - name: scripts
           configMap:
-            name: mongo-b-rs-init
+            name: mongo-b-init
             defaultMode: 0755
-        - name: keyfile
-          secret:
-            secretName: mongo-keyfile
-            defaultMode: 0400
----
-apiVersion: v1
-kind: ConfigMap
-metadata:
-  name: mongo-b-rs-init
-  namespace: mongo
-data:
-  init.sh: |
-    #!/bin/sh
-    set -e
-    PRIMARY="mongo-b-0.svc-mongo-b:27017"
-    MEMBERS="[
-      {_id: 0, host: \"mongo-b-0.svc-mongo-b:27017\"},
-      {_id: 1, host: \"mongo-b-1.svc-mongo-b:27017\"},
-      {_id: 2, host: \"mongo-b-2.svc-mongo-b:27017\"},
-      {_id: 3, host: \"mongo-b-3.svc-mongo-b:27017\"}
-    ]"
-
-    wait_for() {
-      local host="$1"
-      until mongosh --quiet --host "$host" -u "$MONGO_INITDB_ROOT_USERNAME" -p "$MONGO_INITDB_ROOT_PASSWORD" --authenticationDatabase admin --eval "db.runCommand({ ping: 1 })" >/dev/null 2>&1; do
-        echo "Waiting for $host..."
-        sleep 2
-      done
-    }
-
-    wait_for "$PRIMARY"
-    mongosh --quiet --host "$PRIMARY" -u "$MONGO_INITDB_ROOT_USERNAME" -p "$MONGO_INITDB_ROOT_PASSWORD" --authenticationDatabase admin --eval "
-      const status = rs.status().ok;
-      if (status !== 1) {
-        rs.initiate({ _id: 'rs-b', members: ${MEMBERS} });
-      }
-    "
 ---
 apiVersion: v1
 kind: Service
