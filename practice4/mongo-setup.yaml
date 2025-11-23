@@ -295,6 +295,22 @@ spec:
         app: mongo
         instance: mongo-b
     spec:
+      initContainers:
+        - name: keyfile-prepare
+          image: mongo:7.0
+          command:
+            - /bin/sh
+            - -c
+            - |
+              cp /secrets/keyfile /keyfile/keyfile
+              chmod 400 /keyfile/keyfile
+              chown 999:999 /keyfile/keyfile
+          volumeMounts:
+            - name: keyfile-secret
+              mountPath: /secrets
+              readOnly: true
+            - name: keyfile
+              mountPath: /keyfile
       containers:
         - name: mongo
           image: mongo:7.0
@@ -324,7 +340,7 @@ spec:
               mountPath: /docker-entrypoint-initdb.d/init.js
               subPath: init.js
             - name: keyfile
-              mountPath: /etc/mongo-keyfile/keyfile
+              mountPath: /etc/mongo-keyfile
               readOnly: true
       volumes:
         - name: data
@@ -333,9 +349,11 @@ spec:
           configMap:
             name: mongo-b-init
         - name: keyfile
+          emptyDir: {}
+        - name: keyfile-secret
           secret:
             secretName: mongo-keyfile
-            defaultMode: 0o400
+            defaultMode: 0400
 ---
 # Сервис для mongo-b
 ---
