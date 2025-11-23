@@ -284,6 +284,7 @@ metadata:
   name: mongo-b
   namespace: mongo
 spec:
+  serviceName: svc-mongo-b
   replicas: 3
   selector:
     matchLabels:
