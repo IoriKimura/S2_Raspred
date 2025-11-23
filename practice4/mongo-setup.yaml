@@ -81,6 +81,121 @@ data:
       roles: [{ role: "read", db: dbName }],
     });
 ---
+# КонфигМап для репликации mongo-b
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: mongo-b-rs-init
+  namespace: mongo
+data:
+  rs-init.js: |
+    // Идемпотентная инициализация репликасета rs-b
+
+    let alreadyInited = false;
+    try {
+      const status = rs.status();
+      if (status.ok === 1) {
+        print("Replica set already initialized, skipping rs.initiate");
+        alreadyInited = true;
+      }
+    } catch (e) {
+      print("Replica set not yet initialized, will call rs.initiate");
+    }
+
+    if (!alreadyInited) {
+      rs.initiate({
+        _id: "rs-b",
+        members: [
+          { _id: 0, host: "mongo-b-0.svc-mongo-b:27017" },
+          { _id: 1, host: "mongo-b-1.svc-mongo-b:27017" },
+          { _id: 2, host: "mongo-b-2.svc-mongo-b:27017" }
+        ]
+      });
+      print("Replica set rs-b initialized");
+    }
+
+    // Высвечиваем текущий статус
+    try {
+      printjson(rs.status());
+    } catch (e) {
+      print("Error getting rs.status(): " + e);
+    }
+---
+# Job для настройки репликации mongo-b
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: mongo-b-rs-init
+  namespace: mongo
+spec:
+  template:
+    spec:
+      restartPolicy: OnFailure
+      initContainers:
+        - name: wait-for-mongo-b
+          image: mongo:7.0
+          command:
+            - bash
+            - -c
+            - |
+              echo "Waiting for mongo-b-0 to be ready..."
+              until mongosh --host mongo-b-0.svc-mongo-b:27017 \
+                -u "$MONGO_INITDB_ROOT_USERNAME" \
+                -p "$MONGO_INITDB_ROOT_PASSWORD" \
+                --authenticationDatabase admin \
+                --quiet \
+                --eval 'db.adminCommand({ ping: 1 })' >/dev/null 2>&1; do
+                  echo "Mongo is not ready yet, retrying..."
+                  sleep 3
+              done
+              echo "Mongo is ready, proceeding to rs init"
+          env:
+            - name: MONGO_INITDB_ROOT_USERNAME
+              valueFrom:
+                secretKeyRef:
+                  name: mongo-secrets
+                  key: root-user
+            - name: MONGO_INITDB_ROOT_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: mongo-secrets
+                  key: root-password
+      containers:
+        - name: rs-init
+          image: mongo:7.0
+          command:
+            - bash
+            - -c
+            - |
+              echo "Running replica set initialization script..."
+              mongosh --host mongo-b-0.svc-mongo-b:27017 \
+                -u "$MONGO_INITDB_ROOT_USERNAME" \
+                -p "$MONGO_INITDB_ROOT_PASSWORD" \
+                --authenticationDatabase admin \
+                /rs-init.js
+              echo "Replica set init finished"
+          env:
+            - name: MONGO_INITDB_ROOT_USERNAME
+              valueFrom:
+                secretKeyRef:
+                  name: mongo-secrets
+                  key: root-user
+            - name: MONGO_INITDB_ROOT_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: mongo-secrets
+                  key: root-password
+          volumeMounts:
+            - name: rs-init-script
+              mountPath: /rs-init.js
+              subPath: rs-init.js
+      volumes:
+        - name: rs-init-script
+          configMap:
+            name: mongo-b-rs-init
+---
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -142,12 +257,12 @@ spec:
       targetPort: 27017
 ---
 apiVersion: apps/v1
-kind: Deployment
+kind: StatefulSet
 metadata:
   name: mongo-b
   namespace: mongo
 spec:
-  replicas: 1
+  replicas: 3
   selector:
     matchLabels:
       app: mongo
@@ -161,6 +276,10 @@ spec:
       containers:
         - name: mongo
           image: mongo:7.0
+          args:
+            - "--replSet"
+            - "rs-b"
+            - "--bind_api_all"
           ports:
             - containerPort: 27017
           env:
@@ -196,6 +315,7 @@ spec:
   selector:
     app: mongo
     instance: mongo-b
+  clusterIP: None
   ports:
     - name: mongo
       port: 27017
