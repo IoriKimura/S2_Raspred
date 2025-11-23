@@ -187,7 +187,20 @@ spec:
             - bash
             - -c
             - |
-              echo "Running replica set initialization script..."
+              echo "Waiting for all mongo-b pods..."
+              for h in mongo-b-0.svc-mongo-b mongo-b-1.svc-mongo-b mongo-b-2.svc-mongo-b; do
+                until mongosh --host "$h:27017" \
+                  -u "$MONGO_INITDB_ROOT_USERNAME" \
+                  -p "$MONGO_INITDB_ROOT_PASSWORD" \
+                  --authenticationDatabase admin \
+                  --quiet \
+                  --eval 'db.adminCommand({ ping: 1 })' >/dev/null 2>&1; do
+                    echo "$h not ready yet, retrying..."
+                    sleep 3
+                done
+                echo "$h is ready"
+              done
+              echo "All members are reachable, running rs.initiate..."
               mongosh --host mongo-b-0.svc-mongo-b:27017 \
                 -u "$MONGO_INITDB_ROOT_USERNAME" \
                 -p "$MONGO_INITDB_ROOT_PASSWORD" \
