@@ -3,6 +3,8 @@ kind: Namespace
 metadata:
   name: mongo
 ---
+# Секрет с паролем root-пользователя
+---
 apiVersion: v1
 kind: Secret
 metadata:
@@ -13,6 +15,8 @@ stringData:
   root-user: root
   root-password: rootpwd
 ---
+# Секрет с keyFile для репликации
+---
 apiVersion: v1
 kind: Secret
 metadata:
@@ -21,7 +25,9 @@ metadata:
 type: Opaque
 stringData:
   keyfile: |
-    8c36f8c0e6c94c6d8a8d7a3c2c1f0e9b
+    hgsg21hgsj2hg812gh12g1hg12g1hg12
+---
+# инит-конфигмап для mongo-a
 ---
 apiVersion: v1
 kind: ConfigMap
@@ -30,7 +36,7 @@ metadata:
   namespace: mongo
 data:
   init.js: |
-    // Init script for standalone Mongo A
+    // Init script for mongo-a (standalone)
     const dbName = "dbA";
     const localUser = "userA";
     const localPass = "passwordA";
@@ -56,6 +62,170 @@ data:
       pwd: sharedPass,
       roles: [{ role: "read", db: dbName }],
     });
+---
+# init-конфигмап для mongo-b
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: mongo-b-init
+  namespace: mongo
+data:
+  init.js: |
+    // Init script for mongo-b (standalone)
+    const dbName = "dbB";
+    const localUser = "userB";
+    const localPass = "passwordB";
+    const sharedUser = "reader";
+    const sharedPass = "passwordR";
+
+    const seedValue = () => Math.random().toString(36).slice(2, 10);
+
+    const dbInstance = db.getSiblingDB(dbName);
+    dbInstance.sample.insertMany([
+      { key: seedValue(), createdAt: new Date() },
+      { key: seedValue(), createdAt: new Date() },
+    ]);
+
+    dbInstance.createUser({
+      user: localUser,
+      pwd: localPass,
+      roles: [{ role: "readWrite", db: dbName }],
+    });
+
+    dbInstance.createUser({
+      user: sharedUser,
+      pwd: sharedPass,
+      roles: [{ role: "read", db: dbName }],
+    });
+---
+# КонфигМап для репликации mongo-b
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: mongo-b-rs-init
+  namespace: mongo
+data:
+  rs-init.js: |
+    // Идемпотентная инициализация репликасета rs-b
+
+    let alreadyInited = false;
+    try {
+      const status = rs.status();
+      if (status.ok === 1) {
+        print("Replica set already initialized, skipping rs.initiate");
+        alreadyInited = true;
+      }
+    } catch (e) {
+      print("Replica set not yet initialized, will call rs.initiate");
+    }
+
+    if (!alreadyInited) {
+      rs.initiate({
+        _id: "rs-b",
+        members: [
+          { _id: 0, host: "mongo-b-0.svc-mongo-b:27017" },
+          { _id: 1, host: "mongo-b-1.svc-mongo-b:27017" },
+          { _id: 2, host: "mongo-b-2.svc-mongo-b:27017" }
+        ]
+      });
+      print("Replica set rs-b initialized");
+    }
+
+    // Высвечиваем текущий статус
+    try {
+      printjson(rs.status());
+    } catch (e) {
+      print("Error getting rs.status(): " + e);
+    }
+---
+# Job для настройки репликации mongo-b
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: mongo-b-rs-init
+  namespace: mongo
+spec:
+  template:
+    spec:
+      restartPolicy: OnFailure
+      initContainers:
+        - name: wait-for-mongo-b
+          image: mongo:7.0
+          command:
+            - bash
+            - -c
+            - |
+              echo "Waiting for mongo-b-0 to be ready..."
+              until mongosh --host mongo-b-0.svc-mongo-b:27017 \
+                -u "$MONGO_INITDB_ROOT_USERNAME" \
+                -p "$MONGO_INITDB_ROOT_PASSWORD" \
+                --authenticationDatabase admin \
+                --quiet \
+                --eval 'db.adminCommand({ ping: 1 })' >/dev/null 2>&1; do
+                  echo "Mongo is not ready yet, retrying..."
+                  sleep 3
+              done
+              echo "Mongo is ready, proceeding to rs init"
+          env:
+            - name: MONGO_INITDB_ROOT_USERNAME
+              valueFrom:
+                secretKeyRef:
+                  name: mongo-secrets
+                  key: root-user
+            - name: MONGO_INITDB_ROOT_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: mongo-secrets
+                  key: root-password
+      containers:
+        - name: rs-init
+          image: mongo:7.0
+          command:
+            - bash
+            - -c
+            - |
+              echo "Waiting for all mongo-b pods..."
+              for h in mongo-b-0.svc-mongo-b mongo-b-1.svc-mongo-b mongo-b-2.svc-mongo-b; do
+                until mongosh --host "$h:27017" \
+                  -u "$MONGO_INITDB_ROOT_USERNAME" \
+                  -p "$MONGO_INITDB_ROOT_PASSWORD" \
+                  --authenticationDatabase admin \
+                  --quiet \
+                  --eval 'db.adminCommand({ ping: 1 })' >/dev/null 2>&1; do
+                    echo "$h not ready yet, retrying..."
+                    sleep 3
+                done
+                echo "$h is ready"
+              done
+              echo "All members are reachable, running rs.initiate..."
+              mongosh --host mongo-b-0.svc-mongo-b:27017 \
+                -u "$MONGO_INITDB_ROOT_USERNAME" \
+                -p "$MONGO_INITDB_ROOT_PASSWORD" \
+                --authenticationDatabase admin \
+                /rs-init.js
+              echo "Replica set init finished"
+          env:
+            - name: MONGO_INITDB_ROOT_USERNAME
+              valueFrom:
+                secretKeyRef:
+                  name: mongo-secrets
+                  key: root-user
+            - name: MONGO_INITDB_ROOT_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: mongo-secrets
+                  key: root-password
+          volumeMounts:
+            - name: rs-init-script
+              mountPath: /rs-init.js
+              subPath: rs-init.js
+      volumes:
+        - name: rs-init-script
+          configMap:
+            name: mongo-b-rs-init
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -103,6 +273,8 @@ spec:
           configMap:
             name: mongo-a-init
 ---
+# Сервис для mongo-a
+---
 apiVersion: v1
 kind: Service
 metadata:
@@ -117,96 +289,7 @@ spec:
       port: 27017
       targetPort: 27017
 ---
-apiVersion: v1
-kind: ConfigMap
-metadata:
-  name: mongo-b-init
-  namespace: mongo
-data:
-  init.sh: |
-    #!/bin/sh
-    set -e
-
-    PRIMARY="mongo-b-0.svc-mongo-b:27017"
-    MEMBERS="[
-      {_id: 0, host: \"mongo-b-0.svc-mongo-b:27017\"},
-      {_id: 1, host: \"mongo-b-1.svc-mongo-b:27017\"},
-      {_id: 2, host: \"mongo-b-2.svc-mongo-b:27017\"},
-      {_id: 3, host: \"mongo-b-3.svc-mongo-b:27017\"}
-    ]"
-
-    wait_for() {
-      local host="$1"
-      until mongosh --quiet --host "$host" --eval 'db.runCommand({ ping: 1 })' >/dev/null 2>&1; do
-        echo "Waiting for $host..."
-        sleep 2
-      done
-    }
-
-    wait_primary() {
-      until mongosh --quiet --host "$PRIMARY" --eval 'try { rs.isMaster().ismaster } catch(e) { false }' | grep -q "true"; do
-        echo "Waiting for primary state..."
-        sleep 2
-      done
-    }
-
-    echo "Waiting for primary Mongo node to be reachable..."
-    wait_for "$PRIMARY"
-
-    echo "Initializing replica set rs-b (if needed)..."
-    mongosh --quiet --host "$PRIMARY" \
-      -u "$MONGO_INITDB_ROOT_USERNAME" -p "$MONGO_INITDB_ROOT_PASSWORD" --authenticationDatabase admin \
-      --eval "
-        const cfg = { _id: 'rs-b', members: ${MEMBERS} };
-        try {
-          rs.initiate(cfg);
-        } catch (e) {
-          if (!/already initialized/i.test(e.message)) {
-            throw e;
-          }
-        }
-      "
-
-    echo "Waiting for PRIMARY state..."
-    wait_primary
-
-    echo "Configuring dbB users and sample data..."
-    mongosh --quiet --host "$PRIMARY" \
-      -u "$MONGO_INITDB_ROOT_USERNAME" -p "$MONGO_INITDB_ROOT_PASSWORD" --authenticationDatabase admin <<'EOF'
-      const dbName = "dbB";
-      const localUser = "userB";
-      const localPass = "passwordB";
-      const sharedUser = "reader";
-      const sharedPass = "passwordR";
-
-      const seedValue = () => Math.random().toString(36).slice(2, 10);
-      const dbInstance = db.getSiblingDB(dbName);
-
-      if (!dbInstance.getUser(localUser)) {
-        dbInstance.createUser({
-          user: localUser,
-          pwd: localPass,
-          roles: [{ role: "readWrite", db: dbName }],
-        });
-      }
-
-      if (!dbInstance.getUser(sharedUser)) {
-        dbInstance.createUser({
-          user: sharedUser,
-          pwd: sharedPass,
-          roles: [{ role: "read", db: dbName }],
-        });
-      }
-
-      if (dbInstance.sample.countDocuments() === 0) {
-        dbInstance.sample.insertMany([
-          { key: seedValue(), createdAt: new Date() },
-          { key: seedValue(), createdAt: new Date() },
-        ]);
-      }
-    EOF
-
-    echo "Replica set rs-b and dbB initialization completed."
+# СтейтфулСет для mongo-b из 3 копий
 ---
 apiVersion: apps/v1
 kind: StatefulSet
@@ -215,7 +298,7 @@ metadata:
   namespace: mongo
 spec:
   serviceName: svc-mongo-b
-  replicas: 4
+  replicas: 3
   selector:
     matchLabels:
       app: mongo
@@ -226,11 +309,25 @@ spec:
         app: mongo
         instance: mongo-b
     spec:
+      initContainers:
+        - name: keyfile-prepare
+          image: mongo:7.0
+          command:
+            - /bin/sh
+            - -c
+            - |
+              cp /secrets/keyfile /keyfile/keyfile
+              chmod 400 /keyfile/keyfile
+              chown 999:999 /keyfile/keyfile
+          volumeMounts:
+            - name: keyfile-secret
+              mountPath: /secrets
+              readOnly: true
+            - name: keyfile
+              mountPath: /keyfile
       containers:
         - name: mongo
           image: mongo:7.0
-          securityContext:
-            runAsUser: 0        # <<< добавили
           args:
             - "--replSet"
             - "rs-b"
@@ -253,52 +350,26 @@ spec:
           volumeMounts:
             - name: data
               mountPath: /data/db
+            - name: init-script
+              mountPath: /docker-entrypoint-initdb.d/init.js
+              subPath: init.js
             - name: keyfile
               mountPath: /etc/mongo-keyfile
               readOnly: true
       volumes:
         - name: data
           emptyDir: {}
+        - name: init-script
+          configMap:
+            name: mongo-b-init
         - name: keyfile
+          emptyDir: {}
+        - name: keyfile-secret
           secret:
             secretName: mongo-keyfile
             defaultMode: 0400
 ---
-apiVersion: batch/v1
-kind: Job
-metadata:
-  name: mongo-b-rs-init
-  namespace: mongo
-spec:
-  template:
-    metadata:
-      labels:
-        job: mongo-b-rs-init
-    spec:
-      restartPolicy: OnFailure
-      containers:
-        - name: rs-init
-          image: mongo:7.0
-          command: ["/bin/sh", "/scripts/init.sh"]
-          env:
-            - name: MONGO_INITDB_ROOT_USERNAME
-              valueFrom:
-                secretKeyRef:
-                  name: mongo-secrets
-                  key: root-user
-            - name: MONGO_INITDB_ROOT_PASSWORD
-              valueFrom:
-                secretKeyRef:
-                  name: mongo-secrets
-                  key: root-password
-          volumeMounts:
-            - name: scripts
-              mountPath: /scripts
-      volumes:
-        - name: scripts
-          configMap:
-            name: mongo-b-init
-            defaultMode: 0755
+# Сервис для mongo-b
 ---
 apiVersion: v1
 kind: Service
@@ -306,10 +377,10 @@ metadata:
   name: svc-mongo-b
   namespace: mongo
 spec:
-  clusterIP: None
   selector:
     app: mongo
     instance: mongo-b
+  clusterIP: None
   ports:
     - name: mongo
       port: 27017
