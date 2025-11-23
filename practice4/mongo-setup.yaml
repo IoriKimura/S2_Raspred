@@ -335,7 +335,7 @@ spec:
         - name: keyfile
           secret:
             secretName: mongo-keyfile
-            defaultMode: 0400
+            defaultMode: 256
 ---
 # Сервис для mongo-b
 ---
