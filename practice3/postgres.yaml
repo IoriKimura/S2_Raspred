@@ -143,13 +143,6 @@ spec:
       labels:
         app: postgres-a
     spec:
-      #initContainers:
-      #- name: clean-pv
-       # image: busybox
-        #command: ["sh", "-c", "rm -rf /var/lib/postgresql/data/*"]
-        #volumeMounts:
-        #- name: pgdata
-          #mountPath: /var/lib/postgresql/data
       containers:
       - name: postgres
         image: postgres:15
@@ -208,12 +201,6 @@ spec:
               echo "waiting for postgres-a";
               sleep 2;
             done
-      #- name: clean-pv
-        #image: busybox
-        #command: ["sh", "-c", "rm -rf /var/lib/postgresql/data/*"]
-        #volumeMounts:
-        #- name: pgdata
-          #mountPath: /var/lib/postgresql/data
       containers:
       - name: postgres
         image: postgres:15
