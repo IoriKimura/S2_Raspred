@@ -227,13 +227,144 @@ spec:
           configMap:
             name: mongo-b-rs-init
 ---
+# КонфигМап для репликации mongo-a
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: mongo-a-rs-init
+  namespace: mongo
+data:
+  rs-init.js: |
+    // Идемпотентная инициализация репликасета rs-a
+
+    let alreadyInited = false;
+    try {
+      const status = rs.status();
+      if (status.ok === 1) {
+        print("Replica set already initialized, skipping rs.initiate");
+        alreadyInited = true;
+      }
+    } catch (e) {
+      print("Replica set not yet initialized, will call rs.initiate");
+    }
+
+    if (!alreadyInited) {
+      rs.initiate({
+        _id: "rs-a",
+        members: [
+          { _id: 0, host: "mongo-a-0.svc-mongo-a:27017" },
+          { _id: 1, host: "mongo-a-1.svc-mongo-a:27017" },
+          { _id: 2, host: "mongo-a-2.svc-mongo-a:27017" }
+        ]
+      });
+      print("Replica set rs-a initialized");
+    }
+
+    // Высвечиваем текущий статус
+    try {
+      printjson(rs.status());
+    } catch (e) {
+      print("Error getting rs.status(): " + e);
+    }
+---
+# Job для настройки репликации mongo-a
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: mongo-a-rs-init
+  namespace: mongo
+spec:
+  template:
+    spec:
+      restartPolicy: OnFailure
+      initContainers:
+        - name: wait-for-mongo-a
+          image: mongo:7.0
+          command:
+            - bash
+            - -c
+            - |
+              echo "Waiting for mongo-a-0 to be ready..."
+              until mongosh --host mongo-a-0.svc-mongo-a:27017 \
+                -u "$MONGO_INITDB_ROOT_USERNAME" \
+                -p "$MONGO_INITDB_ROOT_PASSWORD" \
+                --authenticationDatabase admin \
+                --quiet \
+                --eval 'db.adminCommand({ ping: 1 })' >/dev/null 2>&1; do
+                  echo "Mongo is not ready yet, retrying..."
+                  sleep 3
+              done
+              echo "Mongo is ready, proceeding to rs init"
+          env:
+            - name: MONGO_INITDB_ROOT_USERNAME
+              valueFrom:
+                secretKeyRef:
+                  name: mongo-secrets
+                  key: root-user
+            - name: MONGO_INITDB_ROOT_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: mongo-secrets
+                  key: root-password
+      containers:
+        - name: rs-init
+          image: mongo:7.0
+          command:
+            - bash
+            - -c
+            - |
+              echo "Waiting for all mongo-a pods..."
+              for h in mongo-a-0.svc-mongo-a mongo-a-1.svc-mongo-a mongo-a-2.svc-mongo-a; do
+                until mongosh --host "$h:27017" \
+                  -u "$MONGO_INITDB_ROOT_USERNAME" \
+                  -p "$MONGO_INITDB_ROOT_PASSWORD" \
+                  --authenticationDatabase admin \
+                  --quiet \
+                  --eval 'db.adminCommand({ ping: 1 })' >/dev/null 2>&1; do
+                    echo "$h not ready yet, retrying..."
+                    sleep 3
+                done
+                echo "$h is ready"
+              done
+              echo "All members are reachable, running rs.initiate..."
+              mongosh --host mongo-a-0.svc-mongo-a:27017 \
+                -u "$MONGO_INITDB_ROOT_USERNAME" \
+                -p "$MONGO_INITDB_ROOT_PASSWORD" \
+                --authenticationDatabase admin \
+                /rs-init.js
+              echo "Replica set init finished"
+          env:
+            - name: MONGO_INITDB_ROOT_USERNAME
+              valueFrom:
+                secretKeyRef:
+                  name: mongo-secrets
+                  key: root-user
+            - name: MONGO_INITDB_ROOT_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: mongo-secrets
+                  key: root-password
+          volumeMounts:
+            - name: rs-init-script
+              mountPath: /rs-init.js
+              subPath: rs-init.js
+      volumes:
+        - name: rs-init-script
+          configMap:
+            name: mongo-a-rs-init
+---
+# StatefulSet для mongo-a из 3 копий (с репликацией)
+---
 apiVersion: apps/v1
-kind: Deployment
+kind: StatefulSet
 metadata:
   name: mongo-a
   namespace: mongo
 spec:
-  replicas: 1
+  serviceName: svc-mongo-a
+  replicas: 3  # три реплики для высокой доступности
   selector:
     matchLabels:
       app: mongo
@@ -244,9 +375,31 @@ spec:
         app: mongo
         instance: mongo-a
     spec:
+      initContainers:
+        - name: keyfile-prepare
+          image: mongo:7.0
+          command:
+            - /bin/sh
+            - -c
+            - |
+              cp /secrets/keyfile /keyfile/keyfile
+              chmod 400 /keyfile/keyfile
+              chown 999:999 /keyfile/keyfile
+          volumeMounts:
+            - name: keyfile-secret
+              mountPath: /secrets
+              readOnly: true
+            - name: keyfile
+              mountPath: /keyfile
       containers:
         - name: mongo
           image: mongo:7.0
+          args:
+            - "--replSet"
+            - "rs-a"
+            - "--bind_ip_all"
+            - "--keyFile"
+            - "/etc/mongo-keyfile/keyfile"
           ports:
             - containerPort: 27017
           env:
@@ -266,19 +419,58 @@ spec:
             - name: init-script
               mountPath: /docker-entrypoint-initdb.d/init.js
               subPath: init.js
+            - name: keyfile
+              mountPath: /etc/mongo-keyfile
+              readOnly: true
+          resources:
+            requests:
+              memory: "256Mi"
+              cpu: "250m"
+            limits:
+              memory: "512Mi"
+              cpu: "500m"
       volumes:
-        - name: data
-          emptyDir: {}
         - name: init-script
           configMap:
             name: mongo-a-init
+        - name: keyfile
+          emptyDir: {}
+        - name: keyfile-secret
+          secret:
+            secretName: mongo-keyfile
+            defaultMode: 0400
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        resources:
+          requests:
+            storage: 5Gi
 ---
-# Сервис для mongo-a
+# Headless Service для mongo-a (для StatefulSet)
 ---
 apiVersion: v1
 kind: Service
 metadata:
   name: svc-mongo-a
+  namespace: mongo
+spec:
+  clusterIP: None
+  selector:
+    app: mongo
+    instance: mongo-a
+  ports:
+    - name: mongo
+      port: 27017
+      targetPort: 27017
+---
+# Client Service для mongo-a (для доступа приложений)
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: svc-mongo-a-client
   namespace: mongo
 spec:
   selector:
@@ -288,6 +480,7 @@ spec:
     - name: mongo
       port: 27017
       targetPort: 27017
+  type: ClusterIP
 ---
 # СтейтфулСет для mongo-b из 3 копий
 ---

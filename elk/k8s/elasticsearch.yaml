@@ -1,0 +1,136 @@
+# Headless Service для Elasticsearch - обеспечивает стабильные DNS имена для каждого пода
+# Cluster3: ELK Stack
+apiVersion: v1
+kind: Service
+metadata:
+  name: elasticsearch
+  namespace: elk
+  labels:
+    app: elasticsearch
+spec:
+  type: ClusterIP
+  clusterIP: None  # Headless service для StatefulSet
+  ports:
+    - port: 9200      # HTTP API Elasticsearch
+      targetPort: 9200
+      name: http
+    - port: 9300      # транспортный протокол для межнодового обмена
+      targetPort: 9300
+      name: transport
+  selector:
+    app: elasticsearch
+---
+# Service для доступа к Elasticsearch (для клиентов)
+apiVersion: v1
+kind: Service
+metadata:
+  name: elasticsearch-client
+  namespace: elk
+  labels:
+    app: elasticsearch
+spec:
+  type: ClusterIP
+  ports:
+    - port: 9200
+      targetPort: 9200
+      name: http
+  selector:
+    app: elasticsearch
+---
+# StatefulSet для Elasticsearch - управляет кластером Elasticsearch
+# StatefulSet используется для обеспечения стабильности сетевых идентификаторов
+# и правильной работы с постоянным хранилищем
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: elasticsearch
+  namespace: elk
+  labels:
+    app: elasticsearch
+spec:
+  serviceName: elasticsearch  # имя headless service для StatefulSet
+  replicas: 3  # три экземпляра Elasticsearch для высокой доступности
+  selector:
+    matchLabels:
+      app: elasticsearch
+  template:
+    metadata:
+      labels:
+        app: elasticsearch
+    spec:
+      # initContainer исправляет права доступа к директории данных перед запуском Elasticsearch
+      initContainers:
+      - name: fix-permissions
+        image: busybox:1.36
+        command: ['sh', '-c', 'chown -R 1000:1000 /usr/share/elasticsearch/data']
+        securityContext:
+          runAsUser: 0  # запускаем от root для изменения прав
+        volumeMounts:
+        - name: es-data
+          mountPath: /usr/share/elasticsearch/data
+      securityContext:
+        fsGroup: 1000  # устанавливаем группу для всех файлов в volume
+        runAsUser: 1000  # Elasticsearch контейнер работает от пользователя с UID 1000
+      containers:
+      - name: elasticsearch
+        securityContext:
+          capabilities:
+            add:
+              - IPC_LOCK  # для возможности блокировки памяти (если понадобится)
+        image: docker.io/library/elasticsearch:8.15.3
+        ports:
+        - containerPort: 9200  # HTTP API
+          name: http
+        - containerPort: 9300  # транспортный порт
+          name: transport
+        env:
+        - name: node.name
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.name  # имя ноды = имя пода (elasticsearch-0, elasticsearch-1, elasticsearch-2)
+        - name: cluster.name
+          value: "elk-cluster"  # имя кластера
+        - name: discovery.seed_hosts
+          value: "elasticsearch-0.elasticsearch.elk.svc.cluster.local,elasticsearch-1.elasticsearch.elk.svc.cluster.local,elasticsearch-2.elasticsearch.elk.svc.cluster.local"
+        - name: cluster.initial_master_nodes
+          value: "elasticsearch-0,elasticsearch-1,elasticsearch-2"  # начальные master-ноды
+        - name: ES_JAVA_OPTS
+          value: "-Xms1g -Xmx1g"  # ограничение памяти JVM
+        - name: ELASTIC_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: elk-secrets
+              key: elastic-password  # пароль суперпользователя из Secret
+        - name: KIBANA_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: elk-secrets
+              key: kibana-password  # пароль для kibana_system из Secret
+        - name: xpack.security.enabled
+          value: "false"  # отключаем security для тестового стенда
+        - name: xpack.security.http.ssl.enabled
+          value: "false"  # отключаем TLS для HTTP (тестовый стенд)
+        - name: xpack.security.transport.ssl.enabled
+          value: "false"  # отключаем TLS для транспорта
+        - name: bootstrap.memory_lock
+          value: "false"  # отключаем блокировку памяти (требует дополнительных прав)
+        resources:
+          requests:  # минимальные ресурсы, которые гарантирует k8s
+            memory: "2Gi"
+            cpu: "1000m"
+          limits:  # максимальные ресурсы, которые может использовать контейнер
+            memory: "2Gi"
+            cpu: "2000m"
+        volumeMounts:
+        - name: es-data
+          mountPath: /usr/share/elasticsearch/data  # монтируем PVC для постоянного хранения данных
+  volumeClaimTemplates:  # StatefulSet автоматически создает PVC для каждого пода
+  - metadata:
+      name: es-data
+    spec:
+      accessModes:
+        - ReadWriteOnce  # том доступен только одной ноде
+      resources:
+        requests:
+          storage: 10Gi  # запрашиваем 10GB дискового пространства
+

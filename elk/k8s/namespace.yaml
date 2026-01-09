@@ -1,0 +1,9 @@
+# Namespace для ELK стека
+# Cluster3: ELK Stack
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: elk
+  labels:
+    name: elk
+

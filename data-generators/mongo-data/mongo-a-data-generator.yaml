@@ -1,0 +1,60 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mongo-a-data-generator
+  namespace: mongo
+spec:
+  replicas: 2  # две реплики для распределения нагрузки
+  selector:
+    matchLabels:
+      app: mongo-a-data-generator
+  template:
+    metadata:
+      labels:
+        app: mongo-a-data-generator
+    spec:
+      containers:
+      - name: generator
+        image: mongo-data-generator:latest
+        imagePullPolicy: Never
+        env:
+        - name: MONGO_HOST
+          value: "svc-mongo-a-client.mongo.svc.cluster.local"  # Используем client service для доступа к репликасету
+        - name: MONGO_PORT
+          value: "27017"
+        - name: MONGO_DB
+          value: "dbA"
+        - name: MONGO_USER
+          value: "userA"
+        - name: MONGO_PASSWORD
+          value: "passwordA"
+        - name: MONGO_SOURCE
+          value: "mongo-a"  # Источник данных для метаданных в ELK
+        - name: LOGSTASH_HOST
+          value: "192.168.0.42"  # Внешний IP ноды cluster1 для доступа к Logstash через NodePort
+        - name: LOGSTASH_PORT
+          value: "30808"  # NodePort для HTTP input Logstash (доступ из других кластеров)
+        - name: INTERVAL_SECONDS
+          value: "60"  # Отправка данных каждые 60 секунд (1 минута)
+        resources:
+          requests:
+            memory: "128Mi"
+            cpu: "100m"
+          limits:
+            memory: "256Mi"
+            cpu: "500m"
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: mongo-a-data-generator
+  namespace: mongo
+spec:
+  selector:
+    app: mongo-a-data-generator
+  ports:
+  - port: 8000
+    targetPort: 8000
+  type: ClusterIP
+

@@ -1,0 +1,45 @@
+# ConfigMap с конфигурацией пайплайна Logstash
+# Cluster3: ELK Stack
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: logstash-pipeline
+  namespace: elk
+data:
+  logstash.conf: |
+    input {
+      beats {
+        port => 5044 # принимаем события от Filebeat/Metricbeat
+      }
+
+      http {
+        host => "0.0.0.0"         # слушаем на всех интерфейсах для доступа из других кластеров
+        port => 8080              # даём возможность послать лог обычным HTTP POST
+        codec => json             # ожидаем JSON, удобно тестировать через curl
+      }
+
+      stdin {
+        type => "manual-test"     # fallback-ввод, можно писать прямо в консоль контейнера
+      }
+    }
+
+    filter {
+      # Пока фильтров нет, блок оставляем для будущих преобразований
+    }
+
+    output {
+      elasticsearch {
+        hosts => ["http://elasticsearch-client.elk.svc.cluster.local:9200"] # отправляем документы в Elasticsearch через client Service в namespace elk
+        # Учетные данные не нужны, если security отключен
+        # user => "${ELASTIC_USER}"              # учетные данные подтягиваются из окружения контейнера
+        # password => "${ELASTIC_PASSWORD}"
+        ssl => false                           # отключаем SSL, так как Elasticsearch настроен без TLS
+        # Динамический индекс в зависимости от источника данных
+        index => "%{[cluster]}-%{[database]}-%{+YYYY.MM.dd}"  # формат: cluster1-postgresql-2026.01.08
+      }
+
+      stdout {
+        codec => rubydebug # дублируем вывод в консоль для отладки
+      }
+    }
+

@@ -1,0 +1,60 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: postgres-a-data-generator
+  namespace: dbs
+spec:
+  replicas: 2  # две реплики для распределения нагрузки
+  selector:
+    matchLabels:
+      app: postgres-a-data-generator
+  template:
+    metadata:
+      labels:
+        app: postgres-a-data-generator
+    spec:
+      containers:
+      - name: generator
+        image: postgres-data-generator:latest
+        imagePullPolicy: Never
+        env:
+        - name: POSTGRES_HOST
+          value: "postgres-a-svc.dbs.svc.cluster.local"
+        - name: POSTGRES_PORT
+          value: "5432"
+        - name: POSTGRES_DB
+          value: "db_a"
+        - name: POSTGRES_USER
+          value: "user_a"
+        - name: POSTGRES_PASSWORD
+          value: "user_a_pass"
+        - name: POSTGRES_SOURCE
+          value: "postgres-a"  # Источник данных для метаданных в ELK
+        - name: LOGSTASH_HOST
+          value: "logstash.elk.svc.cluster.local"  # Service DNS имя Logstash в namespace elk
+        - name: LOGSTASH_PORT
+          value: "8080"  # Внутренний порт Service для HTTP input Logstash
+        - name: INTERVAL_SECONDS
+          value: "60"  # Отправка данных каждые 60 секунд (1 минута)
+        resources:
+          requests:
+            memory: "128Mi"
+            cpu: "100m"
+          limits:
+            memory: "256Mi"
+            cpu: "500m"
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: postgres-a-data-generator
+  namespace: dbs
+spec:
+  selector:
+    app: postgres-a-data-generator
+  ports:
+  - port: 8000
+    targetPort: 8000
+  type: ClusterIP
+

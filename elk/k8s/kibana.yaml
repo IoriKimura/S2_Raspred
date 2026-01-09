@@ -1,0 +1,60 @@
+# Service для Kibana - ClusterIP для доступа внутри кластера
+# Для доступа снаружи можно использовать port-forward: kubectl port-forward -n elk svc/kibana 5601:5601
+apiVersion: v1
+kind: Service
+metadata:
+  name: kibana
+  namespace: elk
+  labels:
+    app: kibana
+spec:
+  type: ClusterIP  # ClusterIP для доступа внутри кластера
+  ports:
+    - port: 5601        # внутренний порт сервиса
+      targetPort: 5601  # порт контейнера Kibana
+      name: http
+  selector:
+    app: kibana
+---
+# Deployment для Kibana - управляет подом с контейнером Kibana
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: kibana
+  namespace: elk
+  labels:
+    app: kibana
+spec:
+  replicas: 2  # два экземпляра для высокой доступности (минимум для HPA)
+  selector:
+    matchLabels:
+      app: kibana
+  template:
+    metadata:
+      labels:
+        app: kibana
+    spec:
+      containers:
+      - name: kibana
+        image: docker.io/library/kibana:8.15.3
+        ports:
+        - containerPort: 5601  # веб-интерфейс Kibana
+          name: http
+        env:
+        - name: ELASTICSEARCH_HOSTS
+          value: "http://elasticsearch-client.elk.svc.cluster.local:9200"  # DNS имя client Service Elasticsearch в namespace elk
+        - name: ELASTICSEARCH_USERNAME
+          value: "kibana_system"  # Kibana обязана использовать системного пользователя, не elastic
+        - name: ELASTICSEARCH_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: elk-secrets
+              key: kibana-password  # пароль kibana_system из Secret
+        resources:
+          requests:
+            memory: "1Gi"
+            cpu: "500m"
+          limits:
+            memory: "1Gi"
+            cpu: "1000m"
+

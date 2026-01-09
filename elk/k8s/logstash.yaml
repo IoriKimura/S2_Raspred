@@ -1,0 +1,78 @@
+# Service для Logstash - обеспечивает доступность портов для приёма логов
+# ClusterIP для доступа внутри кластера (cluster1)
+apiVersion: v1
+kind: Service
+metadata:
+  name: logstash
+  namespace: elk
+  labels:
+    app: logstash
+spec:
+  type: ClusterIP  # ClusterIP для доступа внутри кластера
+  ports:
+    - port: 5044      # порт для приёма событий от Beats (Filebeat, Metricbeat)
+      targetPort: 5044
+      name: beats
+    - port: 8080      # HTTP input для приёма данных от data-generators
+      targetPort: 8080
+      name: http
+    - port: 9600      # HTTP API Logstash для мониторинга состояния пайплайна
+      targetPort: 9600
+      name: monitoring
+  selector:
+    app: logstash
+---
+# Deployment для Logstash - управляет подом с контейнером Logstash
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: logstash
+  namespace: elk
+  labels:
+    app: logstash
+spec:
+  replicas: 2  # два экземпляра для высокой доступности (минимум для HPA)
+  selector:
+    matchLabels:
+      app: logstash
+  template:
+    metadata:
+      labels:
+        app: logstash
+    spec:
+      containers:
+      - name: logstash
+        image: docker.io/library/logstash:8.15.3
+        ports:
+        - containerPort: 5044  # Beats input
+          name: beats
+        - containerPort: 8080  # HTTP input
+          name: http
+        - containerPort: 9600  # мониторинг API
+          name: monitoring
+        env:
+        - name: LS_JAVA_OPTS
+          value: "-Xms512m -Xmx512m"  # ограничение памяти JVM для Logstash
+        - name: ELASTIC_USER
+          value: "elastic"  # логин для подключения к Elasticsearch
+        - name: ELASTIC_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: elk-secrets
+              key: elastic-password  # пароль из Secret
+        resources:
+          requests:
+            memory: "1Gi"
+            cpu: "500m"
+          limits:
+            memory: "1Gi"
+            cpu: "1000m"
+        volumeMounts:
+        - name: logstash-pipeline
+          mountPath: /usr/share/logstash/pipeline  # монтируем конфигурацию пайплайна из ConfigMap
+          readOnly: true  # только чтение, ConfigMap нельзя изменять из контейнера
+      volumes:
+      - name: logstash-pipeline
+        configMap:
+          name: logstash-pipeline  # используем ConfigMap с конфигурацией logstash.conf
+
