@@ -47,12 +47,15 @@ def generate_random_data():
 def connect_mongo():
     """Подключается к MongoDB"""
     try:
-        # Для репликасета добавляем параметры, для standalone - обычное подключение
+        # Для репликасета добавляем параметры
         if 'mongo-b' in MONGO_SOURCE.lower():
-            # Репликасет: указываем replicaSet и все хосты
+            # Репликасет rs-b: указываем replicaSet
             connection_string = f'mongodb://{MONGO_USER}:{MONGO_PASSWORD}@{MONGO_HOST}:{MONGO_PORT}/{MONGO_DB}?authSource={MONGO_DB}&replicaSet=rs-b'
+        elif 'mongo-a' in MONGO_SOURCE.lower():
+            # Репликасет rs-a: указываем replicaSet
+            connection_string = f'mongodb://{MONGO_USER}:{MONGO_PASSWORD}@{MONGO_HOST}:{MONGO_PORT}/{MONGO_DB}?authSource={MONGO_DB}&replicaSet=rs-a'
         else:
-            # Standalone
+            # Standalone (fallback)
             connection_string = f'mongodb://{MONGO_USER}:{MONGO_PASSWORD}@{MONGO_HOST}:{MONGO_PORT}/{MONGO_DB}?authSource={MONGO_DB}'
         
         client = MongoClient(connection_string, serverSelectionTimeoutMS=5000)

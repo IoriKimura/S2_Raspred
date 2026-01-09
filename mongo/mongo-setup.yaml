@@ -549,9 +549,14 @@ spec:
             - name: keyfile
               mountPath: /etc/mongo-keyfile
               readOnly: true
+          resources:
+            requests:
+              memory: "256Mi"
+              cpu: "250m"
+            limits:
+              memory: "512Mi"
+              cpu: "500m"
       volumes:
-        - name: data
-          emptyDir: {}
         - name: init-script
           configMap:
             name: mongo-b-init
@@ -561,8 +566,16 @@ spec:
           secret:
             secretName: mongo-keyfile
             defaultMode: 0400
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        resources:
+          requests:
+            storage: 5Gi
 ---
-# Сервис для mongo-b
+# Headless Service для mongo-b (для StatefulSet)
 ---
 apiVersion: v1
 kind: Service
@@ -570,11 +583,27 @@ metadata:
   name: svc-mongo-b
   namespace: mongo
 spec:
+  clusterIP: None
   selector:
     app: mongo
     instance: mongo-b
-  clusterIP: None
   ports:
     - name: mongo
       port: 27017
       targetPort: 27017
+---
+# Client Service для mongo-b (для доступа приложений)
+apiVersion: v1
+kind: Service
+metadata:
+  name: svc-mongo-b-client
+  namespace: mongo
+spec:
+  selector:
+    app: mongo
+    instance: mongo-b
+  ports:
+    - name: mongo
+      port: 27017
+      targetPort: 27017
+  type: ClusterIP

@@ -19,7 +19,7 @@ spec:
         imagePullPolicy: Never
         env:
         - name: MONGO_HOST
-          value: "svc-mongo-a-client.mongo.svc.cluster.local"  # Используем client service для доступа к репликасету
+          value: "svc-mongo-a-client.mongo.svc.cluster.local"  # Используем client service для доступа к репликасету rs-a
         - name: MONGO_PORT
           value: "27017"
         - name: MONGO_DB
